@@ -1,15 +1,13 @@
 {
-  "name": "@repo/shared",
+  "name": "@paperclip/shared",
   "version": "0.1.0",
-  "description": "Tipos canónicos compartidos entre api, server y ui",
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
+  "description": "Shared canonical types for paperclip studio",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "catalog:"
+    "typescript": "^5.0.0"
   }
 }
