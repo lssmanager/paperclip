@@ -1,191 +1,264 @@
 /**
  * studio-canonical.ts
- * Tipos canónicos Agency→Department→Workspace→Agent→Subagent
- * Lote 1 — Fundacional. Todo lo demás depende de estos contratos.
+ * Tipos canónicos del sistema de orquestación Agency→Department→Workspace→Agent→Subagent.
  *
- * Estrategia: Compat + Adapter (no hard switch, no migración YAML-first)
- * Referencia conceptual: CrewAI hierarchy + LangGraph thread + AutoGen MoA
+ * Estos tipos son la fuente de verdad para:
+ * - Backend: routes, services, adapters
+ * - Frontend: store, componentes Studio
+ *
+ * NO contienen lógica — solo contratos de forma.
+ *
+ * Referencias de diseño:
+ * - Jerarquía: CrewAI Process.hierarchical + AutoGen OrchestratorAgent
+ * - Persistencia: LangGraph Thread + Checkpointer pattern
+ * - Skills: Semantic Kernel Plugins + Microsoft Agent Framework MCP/OpenAPI
+ * - Canvas: Flowise AgentFlow V2 nodo-por-nodo
+ * - Transporte: Hermes Transport Layer separation
  */
 
-export type AgentRole = 'orchestrator' | 'specialist' | 'subagent';
+// ─── Tipos base ─────────────────────────────────────────────────────────────
 
+export type AgentRole = "orchestrator" | "specialist" | "subagent";
+
+/**
+ * Tipo de skill — soporta taxonomía de interoperabilidad MAF.
+ * 'mcp'       → Model Context Protocol (primer ciudadano)
+ * 'n8n_webhook' → workflow n8n via API/webhook
+ * 'openapi'   → cualquier API con spec OpenAPI, sin wrapper manual
+ * 'builtin'   → skill nativa del runtime
+ * 'function'  → función TypeScript registrada localmente
+ */
 export type SkillType =
-  | 'mcp'         // Model Context Protocol — estándar abierto (Microsoft Agent Framework)
-  | 'n8n_webhook' // Workflow n8n expuesto como skill
-  | 'openapi'     // Cualquier API con spec OpenAPI importada sin wrapper manual
-  | 'builtin'     // Skill nativo del runtime (paperclip built-in)
-  | 'function';   // Función TypeScript registrada directamente
+  | "mcp"
+  | "n8n_webhook"
+  | "openapi"
+  | "builtin"
+  | "function";
 
+/**
+ * Acciones de control de topología — todas fail-closed.
+ * Si el gateway no confirma la acción → no muta estado runtime.
+ */
 export type TopologyAction =
-  | 'connect'
-  | 'disconnect'
-  | 'pause'
-  | 'reactivate'
-  | 'redirect'
-  | 'continue';
+  | "connect"
+  | "disconnect"
+  | "pause"
+  | "reactivate"
+  | "redirect"
+  | "continue";
 
-export type TopologyControlStatus =
-  | 'active'
-  | 'paused'
-  | 'disconnected'
-  | 'unsupported_by_runtime'; // Fail-closed explícito — nunca simular éxito
+export type TopologyLinkType = "delegation" | "handoff" | "redirect";
+export type TopologyLinkState = "active" | "paused" | "disconnected";
 
-export type ScopeType = 'agency' | 'department' | 'workspace' | 'agent';
+export type ScopeType = "agency" | "department" | "workspace" | "agent";
 
-// ─── Skill ───────────────────────────────────────────────────────────────────
-// Equivalente al Plugin de Semantic Kernel: unidad de capacidad registrable
+export type CoreFileDiffStatus = "added" | "modified" | "deleted";
+
+// ─── Skill ──────────────────────────────────────────────────────────────────
+
+/**
+ * SkillSpec — equivalente al Plugin de Semantic Kernel.
+ * Tiene descripción semántica para que el TaskPlanner (futuro) lo seleccione.
+ */
 export interface SkillSpec {
   id: string;
   name: string;
-  description: string; // Descripción semántica para TaskPlanner (Semantic Kernel pattern)
+  /** Descripción semántica legible por LLM para selección automática */
+  description: string;
   type: SkillType;
   inputSchema?: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
+  /** Configuración específica del tipo (URL, auth, etc.) */
   config?: Record<string, unknown>;
-  // Para type='n8n_webhook': webhookUrl, workflowId
-  // Para type='openapi': specUrl, operationId
-  // Para type='mcp': serverUrl, toolName
 }
 
-// ─── Agent ───────────────────────────────────────────────────────────────────
-// allowDelegation mapea directamente a CrewAI allow_delegation=True
-// role='orchestrator' → puede descomponer + delegar (CrewAI manager LLM)
-// role='specialist'   → ejecuta trabajo directo en su dominio
-// role='subagent'     → ejecuta subtareas delegadas por un specialist
+// ─── Agent ──────────────────────────────────────────────────────────────────
+
+/**
+ * AgentSpec canónico.
+ * - allowDelegation: si true, el agente puede delegar subtareas (CrewAI semántica)
+ * - skills: refs a SkillSpec.id del catálogo del nivel o global
+ * - profileJson: perfil generado/propagado por ProfilePropagatorService
+ */
 export interface AgentSpec {
   id: string;
   name: string;
   role: AgentRole;
+  /** Equivalente a CrewAI allow_delegation=True */
   allowDelegation: boolean;
-  skillIds: string[];         // refs a SkillSpec.id del catálogo del workspace o global
-  profileJson?: Record<string, unknown>; // Prompt orquestador calculado por ProfilePropagator
-  modelPolicyId?: string;    // Cascada: agent → workspace → department → agency → global
+  /** IDs de skills del catálogo (local o global) */
+  skillIds: string[];
+  profileJson?: Record<string, unknown>;
+  modelPolicyId?: string;
   budgetPolicyId?: string;
-  reportsToId?: string;       // Self-referential: Subagent reporta a Specialist
+  metadata?: Record<string, unknown>;
 }
 
-// ─── Flow (canvas tipo n8n/Flowise) ──────────────────────────────────────────
-// Taxonomía de nodos inspirada en n8n: Trigger / Action / Logic
-export type NodeType =
-  | 'channel_trigger'  // Trigger: inicia ejecución desde canal
-  | 'agent'            // Action: orquestado por LLM
-  | 'tool'             // Action: determinista
-  | 'condition'        // Logic: branching
-  | 'approval'         // Logic: human-in-the-loop
-  | 'n8n_workflow'     // Action: workflow n8n como nodo del canvas
-  | 'subflow'          // Action: flow anidado
-  | 'handoff';         // Logic: transferencia entre niveles jerárquicos
+// ─── Workspace ──────────────────────────────────────────────────────────────
 
-export interface FlowNode {
-  id: string;
-  type: NodeType;
-  label: string;
-  config: Record<string, unknown>;
-  position: { x: number; y: number };
-}
-
-export interface FlowEdge {
-  id: string;
-  source: string;
-  target: string;
-  label?: string;
-  condition?: string;
-}
-
-export interface FlowSpec {
-  id: string;
-  name: string;
-  nodes: FlowNode[];
-  edges: FlowEdge[];
-  version: number;
-}
-
-// ─── Workspace canónico ───────────────────────────────────────────────────────
+/**
+ * WorkspaceSpecCanonical — adaptado desde el workspace legacy de paperclip.
+ * Coexiste con execution_workspaces vía studio_workspace_memberships.
+ */
 export interface WorkspaceSpecCanonical {
   id: string;
   name: string;
-  departmentId?: string;   // null = workspace standalone (legacy paperclip)
   agents: AgentSpec[];
-  flows: FlowSpec[];
-  localSkillCatalog: SkillSpec[]; // Skills del workspace (hereda del Department/Agency)
-  profileJson?: Record<string, unknown>; // Calculado por ProfilePropagator
+  /** Catálogo local de skills del workspace */
+  localSkillCatalog: SkillSpec[];
+  /** Flujos del canvas (nodos + edges) — inspirado en Flowise AgentFlow V2 */
+  flows?: FlowSpec[];
+  profileJson?: Record<string, unknown>;
 }
 
-// ─── Department ──────────────────────────────────────────────────────────────
-// Delega a Workspaces. Tiene orchestratorAgent propio.
+// ─── Department ─────────────────────────────────────────────────────────────
+
+/**
+ * DepartmentSpec — agrupa workspaces por dominio funcional.
+ * Su orchestratorAgentId apunta a un agente con role='orchestrator'
+ * que delega a los workspaces hijos (AutoGen GroupChatManager pattern).
+ */
 export interface DepartmentSpec {
   id: string;
   name: string;
-  agencyId: string;
+  slug: string;
   orchestratorAgentId?: string;
   workspaces: WorkspaceSpecCanonical[];
-  profileJson?: Record<string, unknown>; // Propagado bottom-up desde workspaces
+  profileJson?: Record<string, unknown>;
 }
 
 // ─── Agency ──────────────────────────────────────────────────────────────────
-// Nivel raíz. Tiene catálogo global de skills compartido por todos los niveles.
+
+/**
+ * AgencySpec — raíz de la jerarquía.
+ * globalSkillCatalog: accesible por todos los niveles hijos.
+ * El orchestratorAgent de Agency recibe mensajes y delega a Departments.
+ */
 export interface AgencySpec {
   id: string;
   name: string;
   slug: string;
   orchestratorAgentId?: string;
   departments: DepartmentSpec[];
-  globalSkillCatalog: SkillSpec[]; // Skills disponibles a todos los departamentos/workspaces
+  /** Catálogo global de skills compartido por toda la Agency */
+  globalSkillCatalog: SkillSpec[];
   profileJson?: Record<string, unknown>;
 }
 
-// ─── Topology ─────────────────────────────────────────────────────────────────
-// Canvas macro: links entre nodos de la jerarquía con estado de control runtime
+// ─── Topology ────────────────────────────────────────────────────────────────
+
+/**
+ * TopologyLink — conexión visual en el canvas macro Agency Topology.
+ * El estado SOLO muta via TopologyService.executeAction() (fail-closed).
+ * La UI nunca asume éxito — muestra el resultado real del backend.
+ */
 export interface TopologyLink {
   id: string;
   fromId: string;
   fromType: ScopeType;
   toId: string;
   toType: ScopeType;
-  linkType: 'delegation' | 'handoff' | 'redirect';
-  controlStatus: TopologyControlStatus;
+  type: TopologyLinkType;
+  /** Estado real de runtime — no simulado */
+  state: TopologyLinkState;
+  /** Razón del estado actual, mostrada en UI sin optimistic fakes */
+  stateReason?: string;
+}
+
+/**
+ * Resultado de una acción de topología (fail-closed).
+ * Si success=false → UI muestra stateReason explícito, no simula éxito.
+ */
+export interface TopologyActionResult {
+  success: boolean;
+  linkId?: string;
+  newState?: TopologyLinkState;
+  reason?: string;
+}
+
+// ─── CoreFiles ───────────────────────────────────────────────────────────────
+
+/**
+ * CoreFileDiffItem — unidad de diff en el façade corefiles.
+ * Equivalente al checkpoint de LangGraph por archivo.
+ */
+export interface CoreFileDiffItem {
+  path: string;
+  before: string | null;
+  after: string;
+  status: CoreFileDiffStatus;
+}
+
+export interface CoreFilePreviewResult {
+  agentId: string;
+  versionId?: string;
+  items: CoreFileDiffItem[];
+  appliedAt?: string;
+}
+
+// ─── Canvas / Flow ───────────────────────────────────────────────────────────
+
+/**
+ * Tipos de nodo del canvas — taxonomía inspirada en n8n + Flowise.
+ *
+ * Trigger (inician ejecución): channel_trigger
+ * Action (hacen trabajo): agent, tool, n8n_workflow
+ * Logic (controlan flujo): condition, approval, handoff, subflow
+ */
+export type FlowNodeType =
+  | "agent"
+  | "tool"
+  | "condition"
+  | "approval"
+  | "n8n_workflow"
+  | "channel_trigger"
+  | "subflow"
+  | "handoff";
+
+export interface FlowNode {
+  id: string;
+  type: FlowNodeType;
+  label: string;
+  /** Posición en el canvas */
+  position: { x: number; y: number };
+  /** Datos de configuración específicos del tipo de nodo */
+  data: Record<string, unknown>;
+}
+
+export interface FlowEdge {
+  id: string;
+  source: string;
+  target: string;
+  /** Etiqueta condicional (para nodos condition) */
+  label?: string;
+  type?: "default" | "conditional" | "handoff";
+}
+
+/**
+ * FlowSpec — especificación serializable de un flow del canvas.
+ * Puede exportarse como endpoint REST (n8n: flows-as-API pattern).
+ */
+export interface FlowSpec {
+  id: string;
+  name: string;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
   metadata?: Record<string, unknown>;
 }
 
-// Resultado de un control de topología (fail-closed contract)
-export interface TopologyActionResult {
-  success: boolean;
-  action: TopologyAction;
-  targetId: string;
-  controlStatus: TopologyControlStatus;
-  reason?: string; // Siempre presente cuando success=false
-  appliedAt?: string; // ISO timestamp, solo cuando success=true
-}
+// ─── Estado canónico completo ────────────────────────────────────────────────
 
-// ─── CoreFile Diff ───────────────────────────────────────────────────────────
-// Para preview/diff/apply/rollback de archivos de configuración del agente
-export interface CoreFileDiffItem {
-  path: string;
-  before: string | null; // null = archivo nuevo
-  after: string | null;  // null = archivo eliminado
-  status: 'added' | 'modified' | 'deleted';
-  linesAdded?: number;
-  linesRemoved?: number;
-}
-
-export interface CoreFileDiffResult {
-  agentId: string;
-  versionFrom?: string;
-  versionTo?: string;
-  items: CoreFileDiffItem[];
-  summary: {
-    added: number;
-    modified: number;
-    deleted: number;
-  };
-}
-
-// ─── Estado canónico completo (respuesta de GET /studio/canonical-state) ──────
-export interface CanonicalStudioState {
+/**
+ * CanonicalState — respuesta completa de GET /api/v1/studio/canonical-state.
+ * Coexiste con el endpoint legacy /studio/state — no lo reemplaza.
+ */
+export interface CanonicalState {
   agencies: AgencySpec[];
-  // Workspaces standalone (legacy paperclip sin department)
-  standaloneWorkspaces: WorkspaceSpecCanonical[];
   topologyLinks: TopologyLink[];
-  generatedAt: string; // ISO timestamp
-  adapterVersion: '1.0'; // Incrementar si cambia el contrato del adapter
+  /** Metadatos de la consulta */
+  meta: {
+    companyId: string;
+    generatedAt: string;
+    /** true si algún workspace se adaptó desde el modelo legacy */
+    hasLegacyAdaptations: boolean;
+  };
 }
